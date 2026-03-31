@@ -151,6 +151,7 @@ def run_screening(params, fins, master, ratios, price_cache):
             "企業名":           m.get("name","")[:20],
             "業種":             m.get("industry","不明")[:10],
             "証券コード":       sc,
+            "有報全文":         f"https://edinetdb.jp/company/{ec}/text",
             "起点年":           actual_sy,
             "純利益起点(百万)": round(ni0/1e6, 0),
             f"純利益{ey}(億)":  round(ni1/1e8, 1),
@@ -255,7 +256,7 @@ if df is not None and len(df) > 0 and p:
                (" + FCF利回り×50" if p.get("use_fcf") else "") +
                f" ｜ 起点年データなしの企業は最古有効年を動的起点（最低{p.get('min_years',5)}年要件）")
 
-    base_cols = ["企業名","業種","証券コード","データ期間",
+    base_cols = ["企業名","業種","証券コード","有報全文","データ期間",
                  "純利益起点(百万)",f"純利益{p['end_year']}(億)",
                  cagr_col,"PER(倍)","時価総額(億)","乖離スコア","株価参考"]
     extra_cols = ["FCF(億)","FCF利回り(%)","ネット有利負債(億)","OI_CAGR3y(%)","粗利率(%)","純利益率(%)","自己資本比率(%)"]
@@ -263,7 +264,7 @@ if df is not None and len(df) > 0 and p:
 
     fmt = {}
     for col in dcols:
-        if col in ["企業名","業種","証券コード","データ期間"]:
+        if col in ["企業名","業種","証券コード","データ期間","有報全文"]:
             continue
         elif col in [cagr_col,"FCF利回り(%)","OI_CAGR3y(%)","粗利率(%)","純利益率(%)","自己資本比率(%)"]:
             fmt[col] = "{:.1f}"
@@ -282,7 +283,8 @@ if df is not None and len(df) > 0 and p:
         styled = styled.background_gradient(subset=["乖離スコア"], cmap="Blues")
     if "FCF利回り(%)" in dcols:
         styled = styled.background_gradient(subset=["FCF利回り(%)"], cmap="Oranges")
-    st.dataframe(styled, use_container_width=True, height=650)
+    st.dataframe(styled, use_container_width=True, height=650,
+                   column_config={"有報全文": st.column_config.LinkColumn("有報全文", display_text="📄開く")})
 
     st.download_button("📥 CSVダウンロード（内部用・非公開）",
                        df.to_csv(index=True, encoding="utf-8-sig"),
