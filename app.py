@@ -1,308 +1,221 @@
-#!/usr/bin/env python3
-"""EPS成長×PER乖離スクリーニング v3.1 — Streamlit Cloud版
-screening_data.json（bundle）から読み込み。J-Quants APIは使用しない。"""
-import json, re
-from pathlib import Path
+"""
+PEGスクリーニング — EPS成長率 × PER 乖離分析
+screening_data.json（EDINET DB由来）を使用
+"""
+
 import streamlit as st
+import json
 import pandas as pd
+import math
 
-st.set_page_config(page_title="EPS×PER乖離スクリーニング", layout="wide")
+st.set_page_config(page_title="PEGスクリーニング", layout="wide")
 
-DATA_FILE = Path(__file__).parent / "screening_data.json"
+# ─── データ読み込み ───
+@st.cache_data
+def load_data():
+    with open("screening_data.json", "r") as f:
+        return json.load(f)
 
+data = load_data()
+master = data["master"]
+financials = data["financials"]
+ratios = data["ratios"]
+
+# ─── EPS CAGR計算（動的起点） ───
+def calc_eps_cagr(eps_series: dict, min_years: int = 3):
+    """
+    EPS時系列からCAGRを算出。
+    起点EPSが0以下の場合、正になる最初の年まで前進（最低min_years要件）。
+    Returns: (cagr_pct, start_year, end_year, start_eps, end_eps, span) or None
+    """
+    years = sorted(eps_series.keys())
+    if len(years) < 2:
+        return None
+
+    end_year = years[-1]
+    end_val = eps_series[end_year]
+    if not isinstance(end_val, dict):
+        return None
+    end_eps = end_val.get("eps")
+    if end_eps is None or end_eps <= 0:
+        return None
+
+    # 起点を探索：正のEPSかつmin_years以上のスパン
+    for sy in years:
+        sv = eps_series[sy]
+        if not isinstance(sv, dict):
+            continue
+        start_eps = sv.get("eps")
+        if start_eps is None or start_eps <= 0:
+            continue
+        span = int(end_year) - int(sy)
+        if span >= min_years:
+            cagr = (end_eps / start_eps) ** (1.0 / span) - 1.0
+            return (cagr * 100, sy, end_year, start_eps, end_eps, span)
+
+    return None
+
+
+# ─── 全社計算 ───
+@st.cache_data
+def build_table(min_years: int):
+    rows = []
+    for code, info in master.items():
+        per = ratios.get(code, {}).get("per")
+        mkt = ratios.get(code, {}).get("market_cap")
+        if per is None or per <= 0:
+            continue
+
+        eps_ts = financials.get(code, {})
+        result = calc_eps_cagr(eps_ts, min_years)
+        if result is None:
+            continue
+
+        cagr_pct, sy, ey, s_eps, e_eps, span = result
+        if cagr_pct <= 0:
+            continue
+
+        peg = per / cagr_pct
+
+        rows.append({
+            "edinet_code": code,
+            "証券コード": str(info.get("sec_code", ""))[:4],
+            "企業名": info.get("name", ""),
+            "業種": info.get("industry", ""),
+            "起点年": int(sy),
+            "起点EPS": round(s_eps, 2),
+            "終点EPS": round(e_eps, 2),
+            "年数": span,
+            "EPS CAGR(%)": round(cagr_pct, 2),
+            "PER": round(per, 2),
+            "PEG": round(peg, 3),
+            "時価総額(億円)": round(mkt / 1e8, 1) if mkt else None,
+        })
+
+    return pd.DataFrame(rows)
+
+
+# ─── UI ───
+st.title("📊 PEGスクリーニング")
+st.caption("PEG = PER ÷ EPS CAGR(%)　｜　PEG < 1.0 = 成長に対して割安")
+
+# --- プリセット ---
 PRESETS = {
-    "📈 成長割安（長期10年）": {
-        "start_year": 2014, "end_year": 2024, "min_ni_cagr": 10,
-        "max_per": 20, "min_market_cap_bn": 100, "w_cagr": 1.2, "w_per": 0.8,
-        "use_fcf": False, "min_years": 5,
-        "desc": "2014→2024年の10年間で純利益CAGR10%以上、PER20倍以下の割安成長株（起点データなしは最低5年で動的補完）"
-    },
-    "🚀 急成長（直近3年）": {
-        "start_year": 2021, "end_year": 2024, "min_ni_cagr": 20,
-        "max_per": 30, "min_market_cap_bn": 50, "w_cagr": 1.5, "w_per": 0.5,
-        "use_fcf": False, "min_years": 3,
-        "desc": "2021→2024年の3年間で純利益CAGR20%以上、PER30倍以下の銘柄"
-    },
-    "🏢 大型割安（5年）": {
-        "start_year": 2019, "end_year": 2024, "min_ni_cagr": 8,
-        "max_per": 15, "min_market_cap_bn": 1000, "w_cagr": 1.0, "w_per": 1.2,
-        "use_fcf": False, "min_years": 5,
-        "desc": "時価総額1,000億円超・5年CAGR8%以上・PER15倍以下の大型割安株"
-    },
-    "💎 超長期複利（12年）": {
-        "start_year": 2012, "end_year": 2024, "min_ni_cagr": 8,
-        "max_per": 25, "min_market_cap_bn": 200, "w_cagr": 1.0, "w_per": 1.0,
-        "use_fcf": False, "min_years": 7,
-        "desc": "2012→2024年の12年間で純利益CAGR8%以上を維持している長期複利銘柄（起点データなしは最低7年で動的補完）"
-    },
-    "🔬 テンバガー候補（FCF重視）": {
-        "start_year": 2019, "end_year": 2024, "min_ni_cagr": 8,
-        "max_per": 25, "min_market_cap_bn": 50, "w_cagr": 1.0, "w_per": 1.0,
-        "use_fcf": True, "min_years": 5,
-        "desc": "Birmingham City Univ.論文(2025)準拠：小型×高FCF利回り×高収益×投資の質チェック"
-    },
-    "💰 ネットキャッシュ割安": {
-        "start_year": 2019, "end_year": 2024, "min_ni_cagr": 5,
-        "max_per": 20, "min_market_cap_bn": 50, "w_cagr": 0.8, "w_per": 1.2,
-        "use_fcf": False, "min_years": 5,
-        "desc": "ネット有利子負債がマイナス（実質ネットキャッシュ）かつ割安な銘柄（清原式）"
-    },
-    "⚙️ カスタム": {
-        "start_year": 2014, "end_year": 2024, "min_ni_cagr": 10,
-        "max_per": 25, "min_market_cap_bn": 100, "w_cagr": 1.0, "w_per": 1.0,
-        "use_fcf": False, "min_years": 5,
-        "desc": "パラメータを自由に設定"
-    },
+    "テンバガー候補（高成長×超割安）": {"peg_max": 0.5, "cagr_min": 20.0, "mkt_min": 0, "mkt_max": 1e18, "min_years": 5},
+    "成長割安（Growth at Reasonable Price）": {"peg_max": 1.0, "cagr_min": 10.0, "mkt_min": 0, "mkt_max": 1e18, "min_years": 5},
+    "大型成長割安": {"peg_max": 1.0, "cagr_min": 8.0, "mkt_min": 5000, "mkt_max": 1e18, "min_years": 5},
+    "バリュー発掘（低PEG×中小型）": {"peg_max": 0.7, "cagr_min": 5.0, "mkt_min": 0, "mkt_max": 5000, "min_years": 3},
+    "カスタム": None,
 }
 
-@st.cache_data
-def load_bundle():
-    bundle = json.loads(DATA_FILE.read_text("utf-8"))
-    return bundle["master"], bundle["financials"], bundle["ratios"], bundle.get("price_cache", {})
+col_preset, col_help = st.columns([3, 1])
+with col_preset:
+    preset_name = st.selectbox("プリセット", list(PRESETS.keys()))
 
-def calc_cagr(v_end, v_start, years):
-    if not all([v_end, v_start]) or v_start <= 0 or v_end <= 0 or years <= 0:
-        return None
-    return (v_end / v_start) ** (1.0 / years) - 1
+with col_help:
+    st.markdown("")
+    st.markdown("")
+    with st.expander("PEGとは？"):
+        st.markdown(
+            "**PEG比率**（Price/Earnings to Growth）= PER ÷ EPS年平均成長率(%)。"
+            "ピーター・リンチが提唱した指標で、PERだけでは見えない「成長速度に対する株価の割安度」を測る。\n\n"
+            "- **PEG < 0.5** → 大幅割安\n"
+            "- **0.5 ≦ PEG < 1.0** → 割安\n"
+            "- **1.0 ≦ PEG < 2.0** → 適正\n"
+            "- **PEG ≧ 2.0** → 割高"
+        )
 
-def run_screening(params, fins, master, ratios, price_cache):
-    sy, ey    = params["start_year"], params["end_year"]
-    min_years = params.get("min_years", 5)
-    use_fcf   = params.get("use_fcf", False)
-    preset    = params.get("preset_name", "")
-    results   = []
-    codes     = list(fins.keys())
-    prog      = st.progress(0)
-    txt       = st.empty()
-
-    for i, ec in enumerate(codes):
-        prog.progress((i+1)/len(codes))
-        if i % 500 == 0:
-            txt.text(f"{i}/{len(codes)}社処理中")
-        by = fins[ec]
-        m  = master.get(ec, {})
-        sc = m.get("sec_code", "")
-        if not sc or not re.match(r'^\d+$', str(sc)):
-            continue
-
-        ni1  = by.get(str(ey), {}).get("net_income")
-        eps1 = by.get(str(ey), {}).get("eps")
-        if not ni1 or ni1 <= 0 or not eps1 or eps1 <= 0:
-            continue
-
-        ni0 = by.get(str(sy), {}).get("net_income")
-        actual_sy = sy
-        if ni0 is None or ni0 <= 0:
-            actual_sy = None
-            for yr in range(sy, ey - min_years + 1):
-                candidate = by.get(str(yr), {}).get("net_income")
-                if candidate and candidate > 0:
-                    actual_sy = yr
-                    ni0 = candidate
-                    break
-            if actual_sy is None:
-                continue
-
-        yspan = ey - actual_sy
-        if yspan < min_years:
-            continue
-
-        g = calc_cagr(ni1, ni0, yspan)
-        if g is None or g*100 < params["min_ni_cagr"]:
-            continue
-
-        rat      = ratios.get(ec, {})
-        per      = rat.get("per")
-        fcf      = rat.get("fcf")
-        ebitda   = rat.get("ebitda")
-        net_debt = rat.get("net_debt")
-        oi_cagr3 = rat.get("oi_cagr_3y")
-        gross_m  = rat.get("gross_margin")
-        net_m    = rat.get("net_margin")
-        equity_r = rat.get("equity_ratio")
-
-        if not per or per <= 0 or per > params["max_per"]:
-            continue
-
-        mc = ni1 * per / 1e8
-        if mc < params["min_market_cap_bn"]:
-            continue
-
-        price = price_cache.get(f"{sc}_2024-03-31")
-
-        if preset == "💰 ネットキャッシュ割安":
-            if net_debt is None or net_debt >= 0:
-                continue
-
-        mc_yen = mc * 1e8
-        fcf_yield = None
-        if fcf is not None and mc_yen > 0:
-            fcf_yield = fcf / mc_yen
-
-        if use_fcf:
-            if fcf_yield is None or fcf_yield <= 0:
-                continue
-
-        score = g*100*params["w_cagr"] - per*params["w_per"]
-        if use_fcf and fcf_yield:
-            score += fcf_yield * 100 * 0.5
-
-        row = {
-            "企業名":           m.get("name","")[:20],
-            "業種":             m.get("industry","不明")[:10],
-            "証券コード":       sc,
-            "有報全文":         f"https://edinetdb.jp/company/{ec}/text",
-            "起点年":           actual_sy,
-            "純利益起点(百万)": round(ni0/1e6, 0),
-            f"純利益{ey}(億)":  round(ni1/1e8, 1),
-            "データ期間":       f"{actual_sy}→{ey}({yspan}年)",
-            "CAGR(%)":          round(g*100, 1),
-            "PER(倍)":          round(per, 1),
-            "時価総額(億)":     round(mc, 0),
-            "乖離スコア":       round(score, 2),
-        }
-        if price:
-            row["株価参考"] = round(price, 0)
-        if fcf is not None:
-            row["FCF(億)"] = round(fcf/1e8, 1)
-        if fcf_yield is not None:
-            row["FCF利回り(%)"] = round(fcf_yield*100, 1)
-        if net_debt is not None:
-            row["ネット有利負債(億)"] = round(net_debt/1e8, 0)
-        if oi_cagr3 is not None:
-            row["OI_CAGR3y(%)"] = round(oi_cagr3*100, 1)
-        if gross_m is not None:
-            row["粗利率(%)"] = round(gross_m*100, 1)
-        if net_m is not None:
-            row["純利益率(%)"] = round(net_m*100, 1)
-        if equity_r is not None:
-            row["自己資本比率(%)"] = round(equity_r*100, 1)
-
-        results.append(row)
-
-    prog.empty(); txt.empty()
-    if not results:
-        return pd.DataFrame()
-    df = pd.DataFrame(results).sort_values("乖離スコア", ascending=False).reset_index(drop=True)
-    df.index += 1
-    return df
-
-# ---- UI ----
-st.title("📊 EPS成長 × PER乖離スクリーニング v3.1")
-st.caption("純利益CAGR・FCF利回り・テンバガー論文指標を統合したスクリーニング ｜ ⚠️ J-Quantsデータは個人利用限定")
-
-master, fins, ratios, price_cache = load_bundle()
-
-preset_name = st.radio("スクリーニングパターン", list(PRESETS.keys()), horizontal=True, index=0)
 preset = PRESETS[preset_name]
-st.info(f"💡 {preset['desc']}")
 
-if preset_name == "⚙️ カスタム":
-    c1, c2 = st.columns(2)
-    with c1:
-        sy  = st.selectbox("起点年", list(range(2012, 2024)), index=2)
-        ey  = st.selectbox("終点年", list(range(2013, 2025)), index=11)
-        mnc = st.slider("最低CAGR(%)", 0, 50, 10)
-        use_fcf = st.checkbox("FCF利回りフィルタ（FCF>0のみ）", value=False)
-    with c2:
-        mp  = st.slider("最大PER(倍)", 5, 100, 25)
-        mmc = st.slider("最低時価総額(億)", 0, 5000, 100, 50)
-        wc  = st.slider("CAGR重み", 0.0, 2.0, 1.0, 0.1)
-        wp  = st.slider("低PER重み", 0.0, 2.0, 1.0, 0.1)
-        myr = st.slider("最低データ期間（年）", 3, 10, 5)
-    params = {"start_year":sy,"end_year":ey,"min_ni_cagr":mnc,"max_per":mp,
-              "min_market_cap_bn":mmc,"w_cagr":wc,"w_per":wp,"use_fcf":use_fcf,
-              "preset_name":preset_name,"min_years":myr}
+if preset is not None:
+    peg_max = preset["peg_max"]
+    cagr_min = preset["cagr_min"]
+    mkt_min = preset["mkt_min"]
+    mkt_max = preset["mkt_max"]
+    min_years = preset["min_years"]
 else:
-    params = {k: preset[k] for k in
-              ["start_year","end_year","min_ni_cagr","max_per","min_market_cap_bn","w_cagr","w_per","use_fcf","min_years"]}
-    params["preset_name"] = preset_name
-    yspan = params["end_year"] - params["start_year"]
-    c1,c2,c3,c4 = st.columns(4)
-    c1.metric("分析期間",    f"{params['start_year']}→{params['end_year']}年（{yspan}年）")
-    c2.metric("最低CAGR",   f"{params['min_ni_cagr']}%")
-    c3.metric("最大PER",    f"{params['max_per']}倍")
-    c4.metric("最低時価総額",f"{params['min_market_cap_bn']}億円")
-
-run_btn = st.button("🔍 実行", type="primary")
-
-for key in ["df_result","last_params","last_preset"]:
-    if key not in st.session_state:
-        st.session_state[key] = None
-
-if run_btn or st.session_state.df_result is None:
-    with st.spinner("スクリーニング実行中..."):
-        df = run_screening(params, fins, master, ratios, price_cache)
-    st.session_state.df_result   = df
-    st.session_state.last_params = params
-    st.session_state.last_preset = preset_name
-
-df = st.session_state.df_result
-p  = st.session_state.last_params
-
-if df is not None and len(df) > 0 and p:
-    cagr_col = "CAGR(%)"
     st.markdown("---")
-    c1,c2,c3,c4,c5 = st.columns(5)
-    c1.metric("抽出企業数",     f"{len(df)}社")
-    c2.metric("CAGR中央値",     f"{df[cagr_col].median():.1f}%")
-    c3.metric("PER中央値",      f"{df['PER(倍)'].median():.1f}倍")
-    c4.metric("最高乖離スコア", f"{df['乖離スコア'].max():.1f}")
-    full_span = df[df["起点年"] == p["start_year"]]
-    c5.metric("フルスパン率",   f"{len(full_span)}/{len(df)}社")
+    c1, c2, c3, c4 = st.columns(4)
+    with c1:
+        peg_max = st.number_input("PEG上限", min_value=0.1, max_value=10.0, value=1.0, step=0.1)
+    with c2:
+        cagr_min = st.number_input("EPS CAGR下限(%)", min_value=0.0, max_value=100.0, value=10.0, step=1.0)
+    with c3:
+        mkt_min = st.number_input("時価総額下限(億円)", min_value=0, value=0, step=100)
+    with c4:
+        min_years = st.number_input("最低年数", min_value=2, max_value=12, value=5, step=1)
+    mkt_max = 1e18
 
-    st.subheader(f"📋 結果（{st.session_state.last_preset}）")
-    st.caption(f"乖離スコア = CAGR(%) × {p['w_cagr']} − PER × {p['w_per']}" +
-               (" + FCF利回り×50" if p.get("use_fcf") else "") +
-               f" ｜ 起点年データなしの企業は最古有効年を動的起点（最低{p.get('min_years',5)}年要件）")
+# --- テーブル構築 ---
+df = build_table(min_years if preset is None else preset.get("min_years", 5))
 
-    base_cols = ["企業名","業種","証券コード","有報全文","データ期間",
-                 "純利益起点(百万)",f"純利益{p['end_year']}(億)",
-                 cagr_col,"PER(倍)","時価総額(億)","乖離スコア","株価参考"]
-    extra_cols = ["FCF(億)","FCF利回り(%)","ネット有利負債(億)","OI_CAGR3y(%)","粗利率(%)","純利益率(%)","自己資本比率(%)"]
-    dcols = [c for c in base_cols + extra_cols if c in df.columns]
+if df.empty:
+    st.warning("条件に合致する企業がありません。")
+    st.stop()
 
-    fmt = {}
-    for col in dcols:
-        if col in ["企業名","業種","証券コード","データ期間","有報全文"]:
-            continue
-        elif col in [cagr_col,"FCF利回り(%)","OI_CAGR3y(%)","粗利率(%)","純利益率(%)","自己資本比率(%)"]:
-            fmt[col] = "{:.1f}"
-        elif col in ["PER(倍)","乖離スコア"]:
-            fmt[col] = "{:.1f}"
-        elif col in ["純利益起点(百万)",f"純利益{p['end_year']}(億)",
-                     "時価総額(億)","FCF(億)","ネット有利負債(億)","株価参考"]:
-            fmt[col] = "{:.0f}"
+# --- フィルタ適用 ---
+mask = (
+    (df["PEG"] <= peg_max)
+    & (df["EPS CAGR(%)"] >= cagr_min)
+)
+if mkt_min > 0:
+    mask &= df["時価総額(億円)"].fillna(0) >= mkt_min
+if mkt_max < 1e18:
+    mask &= df["時価総額(億円)"].fillna(0) <= mkt_max
 
-    styled = df[dcols].style.format(fmt, na_rep="-")
-    if cagr_col in dcols:
-        styled = styled.background_gradient(subset=[cagr_col], cmap="Greens")
-    if "PER(倍)" in dcols:
-        styled = styled.background_gradient(subset=["PER(倍)"], cmap="RdYlGn_r")
-    if "乖離スコア" in dcols:
-        styled = styled.background_gradient(subset=["乖離スコア"], cmap="Blues")
-    if "FCF利回り(%)" in dcols:
-        styled = styled.background_gradient(subset=["FCF利回り(%)"], cmap="Oranges")
-    st.dataframe(styled, use_container_width=True, height=650,
-                   column_config={"有報全文": st.column_config.LinkColumn("有報全文", display_text="📄開く")})
+filtered = df[mask].sort_values("PEG").reset_index(drop=True)
 
-    st.download_button("📥 CSVダウンロード（内部用・非公開）",
-                       df.to_csv(index=True, encoding="utf-8-sig"),
-                       f"eps_per_{p['start_year']}_{p['end_year']}.csv", "text/csv")
+# --- サマリー ---
+st.markdown(f"**{len(filtered)}社** ／ PEG計算可能 {len(df)}社 ／ 全{len(master)}社")
 
-    st.markdown("---")
-    col_a, col_b = st.columns(2)
+# --- PEG分布 ---
+if len(filtered) > 0:
+    col_a, col_b, col_c = st.columns(3)
     with col_a:
-        st.subheader("業種別分布")
-        ind = df["業種"].value_counts().reset_index()
-        ind.columns = ["業種","社数"]
-        st.bar_chart(ind.set_index("業種")["社数"], height=300)
+        n_super = len(filtered[filtered["PEG"] < 0.5])
+        st.metric("大幅割安 (PEG<0.5)", f"{n_super}社")
     with col_b:
-        if "FCF利回り(%)" in df.columns:
-            st.subheader("FCF利回り分布")
-            fcf_pos = df[df["FCF利回り(%)"] > 0]["FCF利回り(%)"]
-            if len(fcf_pos) > 0:
-                st.bar_chart(fcf_pos.value_counts(bins=10).sort_index(), height=300)
+        n_cheap = len(filtered[(filtered["PEG"] >= 0.5) & (filtered["PEG"] < 1.0)])
+        st.metric("割安 (0.5≦PEG<1.0)", f"{n_cheap}社")
+    with col_c:
+        st.metric("中央値PEG", f"{filtered['PEG'].median():.3f}")
 
-elif df is not None and len(df) == 0:
-    st.warning("条件に合う企業が見つかりませんでした。フィルタを緩めてください。")
+# --- 結果テーブル ---
+st.markdown("---")
+
+display_cols = ["証券コード", "企業名", "業種", "起点年", "起点EPS", "終点EPS",
+                "年数", "EPS CAGR(%)", "PER", "PEG", "時価総額(億円)", "edinet_code"]
+
+show_df = filtered[display_cols].copy()
+
+# EDINET有報リンク列
+show_df["有報"] = show_df["edinet_code"].apply(
+    lambda c: f"https://edinetdb.jp/company/{c}"
+)
+
+st.dataframe(
+    show_df.drop(columns=["edinet_code"]),
+    column_config={
+        "有報": st.column_config.LinkColumn("📄", display_text="開く"),
+        "PEG": st.column_config.NumberColumn(format="%.3f"),
+        "EPS CAGR(%)": st.column_config.NumberColumn(format="%.2f"),
+        "PER": st.column_config.NumberColumn(format="%.2f"),
+        "時価総額(億円)": st.column_config.NumberColumn(format="%.1f"),
+    },
+    use_container_width=True,
+    height=700,
+    hide_index=True,
+)
+
+# --- CSV出力 ---
+csv = filtered[display_cols[:-1]].to_csv(index=False)
+st.download_button("CSV出力", csv, "peg_screening.csv", "text/csv")
+
+# --- 注記 ---
+st.markdown("---")
+st.caption(
+    "データ: EDINET DB（有価証券報告書・XBRL由来）｜"
+    "PER: 有報期末株価ベース（株式分割調整済み）｜"
+    "EPS: EDINET XBRL記載値｜"
+    "EPS起点が0以下の場合は正になる最初の年を動的起点として使用"
+)
