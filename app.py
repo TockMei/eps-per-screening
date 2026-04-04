@@ -12,7 +12,12 @@ import matplotlib.pyplot as plt
 import matplotlib.ticker as mticker
 import numpy as np
 
-import japanize_matplotlib
+import matplotlib.font_manager as fm
+from pathlib import Path
+_font_path = Path(__file__).parent / "ipaexg.ttf"
+if _font_path.exists():
+    fm.fontManager.addfont(str(_font_path))
+    plt.rcParams["font.family"] = "IPAexGothic"
 
 st.set_page_config(page_title="PEGスクリーニング", layout="wide")
 
