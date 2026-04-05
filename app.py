@@ -53,7 +53,7 @@ def build_table(cagr_period: str):
         r = ratios.get(code, {})
         per = r.get("per")
         cagr = r.get(cagr_key)
-        if per is None or per <= 0:
+        if per is None or per <= 2 or per > 200:
             continue
         if cagr is None or cagr <= 0:
             continue
@@ -190,6 +190,15 @@ display_cols = ["判定", "証券コード", "企業名", "業種",
                 "純利益CAGR(%)", "PER", "PEG", "ROE(%)", "直近NI成長(%)",
                 "時価総額(億円)", "有報"]
 
+
+# 銘柄検索
+search_q = st.text_input("🔍 銘柄検索（社名・証券コード）", placeholder="例: トヨタ、7203")
+if search_q:
+    search_mask = filtered["企業名"].str.contains(search_q, case=False, na=False) | filtered["証券コード"].str.contains(search_q, na=False)
+    filtered = filtered[search_mask].reset_index(drop=True)
+    if len(filtered) == 0:
+        st.warning(f"「{search_q}」に該当する企業がありません。")
+        st.stop()
 show_all = st.toggle(f"全{len(filtered)}社を表示", value=False)
 show_df = filtered[display_cols] if show_all else filtered[display_cols].head(50)
 if not show_all:
@@ -212,7 +221,7 @@ st.dataframe(
 )
 
 csv_cols = [c for c in display_cols if c != "有報"]
-csv = filtered[csv_cols].to_csv(index=False)
+csv = filtered[csv_cols].to_csv(index=False, encoding="utf-8-sig")
 st.download_button("📥 CSV出力", csv, "peg_screening.csv", "text/csv")
 
 # ━━━ チャート ━━━
@@ -268,7 +277,7 @@ st.markdown("---")
 st.caption(
     "データ: EDINET DB（有価証券報告書・XBRL由来）｜"
     "PER: 有報期末株価ベース（株式分割調整済み）｜"
-    "CAGR: 純利益ベース（株式分割の影響を受けない・上限100%キャップ）｜"
+    "CAGR: 純利益ベース（株式分割の影響を受けない・上限100%キャップ）｜PER: 2〜200倍の範囲外は除外｜"
     "EDINET DB公式算出値を使用｜"
     "時価総額: J-Quants（取得済み企業のみ）｜"
     "※EPSベースのCAGRは株式分割時に遡及調整されないため（EDINET XBRL仕様）、分割の影響を受けない純利益CAGRを採用"
