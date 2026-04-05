@@ -53,24 +53,29 @@ def peg_label(peg):
 
 def compute_ni_cagr(fin_data, n_years):
     """financials時系列から純利益CAGRを計算。
-    fin_data: {"2012": {"net_income": ...}, "2013": {...}, ...}
+    fin_data: {"2012": {"net_income": ..., "excluded": true/absent}, ...}
     n_years: 整数（3,5,10）またはNone（全期間）
     戻り値: float（小数表記 0.08=8%）またはNone
+    変則決算期（excluded=True）はスキップする。
     """
     if not fin_data:
         return None
-    years = sorted(fin_data.keys(), key=lambda x: int(x))
-    if len(years) < 2:
+    # excluded=Trueでない年度のみ使用
+    valid_years = sorted(
+        [y for y, d in fin_data.items() if not d.get("excluded")],
+        key=lambda x: int(x)
+    )
+    if len(valid_years) < 2:
         return None
 
-    latest_year = years[-1]
+    latest_year = valid_years[-1]
     ni_end = fin_data[latest_year].get("net_income")
 
     if n_years is None:
-        start_year = years[0]
+        start_year = valid_years[0]
     else:
         target_start = str(int(latest_year) - n_years)
-        available = [y for y in years if int(y) <= int(target_start)]
+        available = [y for y in valid_years if int(y) <= int(target_start)]
         if not available:
             return None
         start_year = available[-1]
@@ -483,7 +488,8 @@ st.caption(
     "**データソース:** EDINET DB（有価証券報告書・XBRL由来）　"
     "**PER:** 有報期末株価ベース・株式分割調整済み（EDINET DB per_official）　"
     "**CAGR:** 純利益ベース（株式分割の影響を受けない）、上限100%キャップ　"
-    "**フィルタ:** PER 2〜200倍の範囲外は除外 / 起点純利益が赤字の場合はCAGR算出不可（除外）　"
+    "**フィルタ:** PER 2〜200倍の範囲外は除外 / 起点純利益が赤字の場合はCAGR算出不可（除外） / "
+    "変則決算期（決算期変更に伴う12ヶ月未満の会計期間）はCAGR計算から除外　"
     "**時価総額:** PER×純利益による推計値（有報期末時点・純利益が正の企業のみ）"
 )
 st.caption(
