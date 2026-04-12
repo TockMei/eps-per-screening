@@ -381,6 +381,80 @@ csv = filtered[csv_cols].to_csv(index=False, encoding="utf-8-sig")
 st.download_button("📥 CSV出力", csv, "peg_screening.csv", "text/csv")
 
 # ═══════════════════════════════════════════════════
+# 企業体力カード
+# ═══════════════════════════════════════════════════
+st.markdown("---")
+st.markdown("### 企業体力カード")
+st.caption("4軸レーダーチャートで企業の多角的な競争力を可視化。スコアは全上場企業パーセンタイル（0〜100）。")
+
+# 事前計算（初回のみ）
+_axis_scores, _industry_map = build_vitality_scores(ratios, master)
+
+# フィルタ通過企業から選択
+_card_options = [
+    f"{row['企業名']}（{row['証券コード']}）"
+    for _, row in filtered[["企業名", "証券コード"]].iterrows()
+]
+_card_codes = filtered["edinet_code"].tolist()
+
+if _card_options:
+    _sel_idx = st.selectbox(
+        "企業を選択",
+        range(len(_card_options)),
+        format_func=lambda i: _card_options[i],
+        key="vitality_card_select",
+    )
+    _sel_code = _card_codes[_sel_idx]
+    _sel_rat  = ratios.get(_sel_code, {})
+    _sel_ind  = master.get(_sel_code, {}).get("industry", "")
+
+    _scores_target   = _axis_scores.get(_sel_code, {ax: 0.0 for ax in VITALITY_AXES})
+    _scores_industry = get_industry_median(_axis_scores, _industry_map, _sel_code)
+
+    card_col1, card_col2 = st.columns([2, 3])
+    with card_col1:
+        draw_radar(_scores_target, _scores_industry)
+        st.caption(f"業種: {_sel_ind}")
+
+    with card_col2:
+        # 個別指標を4列で表示
+        def _fmt_pct(v, digits=1):
+            return f"{v * 100:.{digits}f}%" if v is not None else "N/A"
+
+        def _fmt_num(v, digits=1):
+            return f"{v:.{digits}f}" if v is not None else "N/A"
+
+        def _fmt_oku(v):
+            return f"{v / 1e8:.1f}億円" if v is not None else "N/A"
+
+        def _fmt_man(v):
+            return f"{v / 10000:.0f}万円" if v is not None else "N/A"
+
+        ic1, ic2, ic3, ic4 = st.columns(4)
+        with ic1:
+            st.markdown("**収益力**")
+            st.markdown(f"営業利益率: {_fmt_pct(_sel_rat.get('operating_margin'))}")
+            st.markdown(f"FCFマージン: {_fmt_pct(_sel_rat.get('fcf_margin'))}")
+            st.markdown(f"ROE: {_fmt_pct(_sel_rat.get('roe'))}")
+        with ic2:
+            st.markdown("**成長力**")
+            st.markdown(f"売上CAGR(3y): {_fmt_pct(_sel_rat.get('revenue_cagr_3y'))}")
+            st.markdown(f"純利益CAGR(3y): {_fmt_pct(_sel_rat.get('ni_cagr_3y'))}")
+        with ic3:
+            st.markdown("**人的資本**")
+            st.markdown(f"HC-ROI: {_fmt_num(_sel_rat.get('hc_roi'))}")
+            st.markdown(f"平均年収: {_fmt_man(_sel_rat.get('avg_salary'))}")
+            st.markdown(f"女性管理職: {_fmt_num(_sel_rat.get('female_mgr_ratio'))}%")
+            st.markdown(f"男性育休: {_fmt_num(_sel_rat.get('male_childcare_leave'))}%")
+            st.markdown(f"賃金格差: {_fmt_num(_sel_rat.get('gender_pay_gap_all'))}%")
+        with ic4:
+            st.markdown("**ガバナンス**")
+            st.markdown(f"女性役員比率: {_fmt_num(_sel_rat.get('female_director_ratio'))}%")
+            st.markdown(f"TSR: {_fmt_num(_sel_rat.get('tsr'))}")
+            st.markdown(f"持合株: {_fmt_oku(_sel_rat.get('cross_shareholding'))}")
+            st.markdown(f"役員報酬: {_fmt_oku(_sel_rat.get('director_remuneration'))}")
+
+# ═══════════════════════════════════════════════════
 # チャート
 # ═══════════════════════════════════════════════════
 st.markdown("---")
