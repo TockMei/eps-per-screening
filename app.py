@@ -495,6 +495,19 @@ def draw_radar(axis_scores_target: dict[str, float], axis_scores_industry: dict[
     plt.close(fig)
 
 
+def _fmt_pct(v, digits=1):
+    return f"{v * 100:.{digits}f}%" if v is not None else "N/A"
+
+def _fmt_num(v, digits=1):
+    return f"{v:.{digits}f}" if v is not None else "N/A"
+
+def _fmt_oku(v):
+    return f"{v / 1e8:.1f}億円" if v is not None else "N/A"
+
+def _fmt_man(v):
+    return f"{v / 10000:.0f}万円" if v is not None else "N/A"
+
+
 # ═══════════════════════════════════════════════════
 # 企業体力カード
 # ═══════════════════════════════════════════════════
@@ -523,7 +536,8 @@ if _card_options:
     _sel_rat  = ratios.get(_sel_code, {})
     _sel_ind  = master.get(_sel_code, {}).get("industry", "")
 
-    _scores_target   = _axis_scores.get(_sel_code, {ax: 0.0 for ax in VITALITY_AXES})
+    _raw = _axis_scores.get(_sel_code, {})
+    _scores_target = {ax: (_raw.get(ax) or 0.0) for ax in VITALITY_AXES}
     _scores_industry = get_industry_median(_axis_scores, _industry_map, _sel_code)
 
     card_col1, card_col2 = st.columns([2, 3])
@@ -533,18 +547,6 @@ if _card_options:
 
     with card_col2:
         # 個別指標を4列で表示
-        def _fmt_pct(v, digits=1):
-            return f"{v * 100:.{digits}f}%" if v is not None else "N/A"
-
-        def _fmt_num(v, digits=1):
-            return f"{v:.{digits}f}" if v is not None else "N/A"
-
-        def _fmt_oku(v):
-            return f"{v / 1e8:.1f}億円" if v is not None else "N/A"
-
-        def _fmt_man(v):
-            return f"{v / 10000:.0f}万円" if v is not None else "N/A"
-
         ic1, ic2, ic3, ic4 = st.columns(4)
         with ic1:
             st.markdown("**収益力**")
