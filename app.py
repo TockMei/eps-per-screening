@@ -25,9 +25,15 @@ st.set_page_config(page_title="利益成長力×PER乖離分析", layout="wide")
 # ─── データ読み込み ───
 @st.cache_data
 def load_data():
-    with open("screening_data.json", "r") as f:
-        return json.load(f)
-
+    try:
+        with open("screening_data.json", "r") as f:
+            return json.load(f)
+    except FileNotFoundError:
+        st.error("データファイル (screening_data.json) が見つかりません。")
+        st.stop()
+    except json.JSONDecodeError:
+        st.error("データファイルの形式が不正です。管理者に連絡してください。")
+        st.stop()
 data = load_data()
 master = data["master"]
 ratios = data["ratios"]
@@ -537,7 +543,7 @@ if _card_options:
     _sel_ind  = master.get(_sel_code, {}).get("industry", "")
 
     _raw = _axis_scores.get(_sel_code, {})
-    _scores_target = {ax: (_raw.get(ax) or 0.0) for ax in VITALITY_AXES}
+    _scores_target = {ax: (_raw.get(ax) if _raw.get(ax) is not None else 0.0) for ax in VITALITY_AXES}
     _scores_industry = get_industry_median(_axis_scores, _industry_map, _sel_code)
 
     card_col1, card_col2 = st.columns([2, 3])
@@ -623,6 +629,7 @@ with chart_col1:
     ax.grid(True, alpha=0.3)
     fig.tight_layout()
     st.pyplot(fig, use_container_width=True)
+    plt.close(fig)
     st.caption(
         "グレー = CAGR・PERの算出が可能な全上場企業　｜　"
         "色付き = 現在のフィルタ条件を満たす企業　｜　"
@@ -664,6 +671,7 @@ with chart_col2:
         ax2.set_xlim(right=max(rates) * 1.4)
         fig2.tight_layout()
         st.pyplot(fig2, use_container_width=True)
+        plt.close(fig2)
         st.caption(
             "各業種の全対象企業のうち、現在の条件を満たす企業が占める割合"
             "（母集団5社未満の業種は除外）"
