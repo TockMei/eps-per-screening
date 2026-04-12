@@ -481,6 +481,121 @@ with chart_col2:
         st.info("該当企業が少なく業種別割合を表示できません。")
 
 # ═══════════════════════════════════════════════════
+# 企業体力カード — ヘルパー
+# ═══════════════════════════════════════════════════
+
+# 4軸の定義
+VITALITY_AXES = {
+    "収益力":   ["operating_margin", "fcf_margin", "roe"],
+    "成長力":   ["revenue_cagr_3y", "ni_cagr_3y"],
+    "人的資本": ["hc_roi", "avg_salary", "female_mgr_ratio"],
+    "ガバナンス": ["female_director_ratio", "tsr"],
+}
+
+# 全ratios社のパーセンタイル辞書を事前計算（ロード時に1回だけ実行）
+@st.cache_data
+def build_vitality_scores(_ratios: dict, _master: dict) -> tuple[dict, dict]:
+    """
+    Returns:
+      axis_scores: {edinet_code: {"収益力": float|None, "成長力": float|None, ...}}
+      industry_map: {edinet_code: industry_str}
+    """
+    # 各指標の全社値を収集
+    metric_values: dict[str, list[tuple[str, float]]] = {m: [] for axis in VITALITY_AXES.values() for m in axis}
+    for code, rat in _ratios.items():
+        for metric in metric_values:
+            v = rat.get(metric)
+            if v is not None and not (isinstance(v, float) and (v != v)):  # NaN除外
+                metric_values[metric].append((code, float(v)))
+
+    # 指標ごとにパーセンタイルランク（0–100）を計算
+    metric_pct: dict[str, dict[str, float]] = {}
+    for metric, pairs in metric_values.items():
+        if not pairs:
+            metric_pct[metric] = {}
+            continue
+        codes_arr = [p[0] for p in pairs]
+        vals_arr  = np.array([p[1] for p in pairs], dtype=float)
+        # stable sort + average tie handling
+        sorted_idx = np.argsort(vals_arr, kind='stable')
+        ranks = np.empty(len(vals_arr), dtype=float)
+        ranks[sorted_idx] = np.arange(len(vals_arr), dtype=float)
+        i = 0
+        while i < len(vals_arr):
+            j = i + 1
+            while j < len(vals_arr) and vals_arr[sorted_idx[j]] == vals_arr[sorted_idx[i]]:
+                j += 1
+            avg_rank = (i + j - 1) / 2.0
+            ranks[sorted_idx[i:j]] = avg_rank
+            i = j
+        pct = ranks / max(len(ranks) - 1, 1) * 100.0
+        metric_pct[metric] = dict(zip(codes_arr, pct.tolist()))
+
+    # 軸スコア（構成指標パーセンタイルの平均）
+    axis_scores: dict[str, dict[str, float | None]] = {}
+    for code in _ratios:
+        scores: dict[str, float | None] = {}
+        for axis_name, metrics in VITALITY_AXES.items():
+            components = [metric_pct[m].get(code) for m in metrics if metric_pct[m].get(code) is not None]
+            scores[axis_name] = float(np.mean(components)) if components else None
+        axis_scores[code] = scores
+
+    # 業種マップ
+    industry_map = {code: _master.get(code, {}).get("industry", "") for code in _ratios}
+
+    return axis_scores, industry_map
+
+
+def get_industry_median(axis_scores: dict, industry_map: dict, target_code: str) -> dict[str, float]:
+    """同業種全社の各軸スコア中央値を返す。データ不足時は空dict。"""
+    target_ind = industry_map.get(target_code, "")
+    if not target_ind:
+        return {}
+    peers = [code for code, ind in industry_map.items() if ind == target_ind and code != target_code]
+    if not peers:
+        return {}
+    result = {}
+    for axis_name in VITALITY_AXES:
+        vals = [axis_scores[c][axis_name] for c in peers if axis_scores.get(c, {}).get(axis_name) is not None]
+        result[axis_name] = float(np.median(vals)) if vals else 0.0
+    return result
+
+
+def draw_radar(axis_scores_target: dict[str, float], axis_scores_industry: dict[str, float]) -> None:
+    """4軸レーダーチャートを matplotlib で描画して st.pyplot に渡す。"""
+    labels = list(VITALITY_AXES.keys())
+    N = len(labels)
+    angles = np.linspace(0, 2 * np.pi, N, endpoint=False).tolist()
+    angles += angles[:1]  # 閉じる
+
+    target_vals = [axis_scores_target.get(lb, 0.0) for lb in labels] + [axis_scores_target.get(labels[0], 0.0)]
+    industry_vals = [axis_scores_industry.get(lb, 0.0) for lb in labels] + [axis_scores_industry.get(labels[0], 0.0)] if axis_scores_industry else None
+
+    fig, ax = plt.subplots(figsize=(5, 5), subplot_kw={"polar": True})
+
+    # 背景グリッド
+    ax.set_ylim(0, 100)
+    ax.set_yticks([25, 50, 75, 100])
+    ax.set_yticklabels(["25", "50", "75", "100"], fontsize=7, color="#888888")
+    ax.set_xticks(angles[:-1])
+    ax.set_xticklabels(labels, fontsize=10)
+    ax.grid(color="#cccccc", linestyle="--", linewidth=0.6, alpha=0.7)
+
+    # 業種中央値（薄いグレー破線、塗りなし）
+    if industry_vals:
+        ax.plot(angles, industry_vals, color="#aaaaaa", linestyle="--", linewidth=1.5, label="業種中央値")
+
+    # 対象企業（濃い青、塗りあり）
+    ax.plot(angles, target_vals, color="#1a56a0", linewidth=2.0, label="対象企業")
+    ax.fill(angles, target_vals, color="#1a56a0", alpha=0.20)
+
+    ax.legend(loc="upper right", bbox_to_anchor=(1.35, 1.15), fontsize=8)
+    fig.tight_layout()
+    st.pyplot(fig, use_container_width=False)
+    plt.close(fig)
+
+
+# ═══════════════════════════════════════════════════
 # 注記
 # ═══════════════════════════════════════════════════
 st.markdown("---")
